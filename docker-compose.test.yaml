@@ -15,7 +15,7 @@ services:
 
   balancer:
     build: .
-    command: ["lb", "--trace=true"]
+    command: ["client", "--trace=true"]
     networks:
       - servers
     ports:
