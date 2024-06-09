@@ -29,6 +29,8 @@ var (
 	lockPool           sync.Mutex
 	healthStatus       sync.Map
 	serverTraffic      = make(map[string]int64)
+	healthChecker      HealthChecker
+	requestSender      RequestSender
 )
 
 func scheme() string {
@@ -38,7 +40,13 @@ func scheme() string {
 	return "http"
 }
 
-func health(dst string) bool {
+type HealthChecker interface {
+	Check(string) bool
+}
+
+type DefaultHealthChecker struct{}
+
+func (hc *DefaultHealthChecker) Check(dst string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s://%s/health", scheme(), dst), nil)
@@ -47,6 +55,16 @@ func health(dst string) bool {
 		return false
 	}
 	return true
+}
+
+type RequestSender interface {
+	Send(*http.Request) (*http.Response, error)
+}
+
+type DefaultRequestSender struct{}
+
+func (rs *DefaultRequestSender) Send(fwdRequest *http.Request) (*http.Response, error) {
+	return http.DefaultClient.Do(fwdRequest)
 }
 
 func healthCheck(ctx context.Context, servers []string) {
@@ -69,7 +87,7 @@ func healthCheck(ctx context.Context, servers []string) {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					isHealthy := health(server)
+					isHealthy := healthChecker.Check(server)
 					lockPool.Lock()
 					healthStatus.Store(server, isHealthy)
 
@@ -118,7 +136,7 @@ func forward(dst string, rw http.ResponseWriter, r *http.Request) error {
 	fwdRequest.URL.Scheme = scheme()
 	fwdRequest.Host = dst
 
-	resp, err := http.DefaultClient.Do(fwdRequest)
+	resp, err := requestSender.Send(fwdRequest)
 	if err == nil {
 		defer resp.Body.Close()
 
@@ -172,15 +190,19 @@ func chooseServer() string {
 func main() {
 	flag.Parse()
 
-	// TODO: Використовуйте дані про стан сервреа, щоб підтримувати список тих серверів, яким можна відправляти ззапит.
-	for _, server := range serversPool {
-		server := server
-		go func() {
-			for range time.Tick(10 * time.Second) {
-				log.Println(server, health(server))
-			}
-		}()
-	}
+	healthChecker = &DefaultHealthChecker{}
+	requestSender = &DefaultRequestSender{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		// This simulates running for some time and then stopping the health checks
+		time.Sleep(1 * time.Minute)
+		cancel()
+	}()
+
+	healthCheck(ctx, serversPool)
 
 	frontend := httptools.CreateServer(*port, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		server := chooseServer()
