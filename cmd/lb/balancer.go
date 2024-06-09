@@ -28,6 +28,7 @@ var (
 	healthyServersPool []string
 	lockPool           sync.Mutex
 	healthStatus       sync.Map
+	serverTraffic      = make(map[string]int64)
 )
 
 func scheme() string {
@@ -119,6 +120,8 @@ func forward(dst string, rw http.ResponseWriter, r *http.Request) error {
 
 	resp, err := http.DefaultClient.Do(fwdRequest)
 	if err == nil {
+		defer resp.Body.Close()
+
 		for k, values := range resp.Header {
 			for _, value := range values {
 				rw.Header().Add(k, value)
@@ -129,11 +132,17 @@ func forward(dst string, rw http.ResponseWriter, r *http.Request) error {
 		}
 		log.Println("fwd", resp.StatusCode, resp.Request.URL)
 		rw.WriteHeader(resp.StatusCode)
-		defer resp.Body.Close()
-		_, err := io.Copy(rw, resp.Body)
+
+		n, err := io.Copy(rw, resp.Body)
 		if err != nil {
 			log.Printf("Failed to write response: %s", err)
+			return err
 		}
+
+		lockPool.Lock()
+		serverTraffic[dst] += n
+		lockPool.Unlock()
+
 		return nil
 	} else {
 		log.Printf("Failed to get response from %s: %s", dst, err)
@@ -142,30 +151,45 @@ func forward(dst string, rw http.ResponseWriter, r *http.Request) error {
 	}
 }
 
+func chooseServer() string {
+	lockPool.Lock()
+	defer lockPool.Unlock()
+
+	var minTrafficServer string
+	var minTraffic int64 = int64(^uint64(0) >> 1) // initialize to max int64 value
+
+	for _, server := range healthyServersPool {
+		traffic := serverTraffic[server]
+		if traffic < minTraffic {
+			minTraffic = traffic
+			minTrafficServer = server
+		}
+	}
+
+	return minTrafficServer
+}
+
 func main() {
 	flag.Parse()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go healthCheck(ctx, serversPool)
+	// TODO: Використовуйте дані про стан сервреа, щоб підтримувати список тих серверів, яким можна відправляти ззапит.
+	for _, server := range serversPool {
+		server := server
+		go func() {
+			for range time.Tick(10 * time.Second) {
+				log.Println(server, health(server))
+			}
+		}()
+	}
 
 	frontend := httptools.CreateServer(*port, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		lockPool.Lock()
-		defer lockPool.Unlock()
-
-		if len(healthyServersPool) == 0 {
+		server := chooseServer()
+		if server == "" {
 			http.Error(rw, "No healthy servers available", http.StatusServiceUnavailable)
 			return
 		}
 
-		// Simple round-robin load balancing
-		server := healthyServersPool[0]
-		healthyServersPool = append(healthyServersPool[1:], server)
-
-		if err := forward(server, rw, r); err != nil {
-			log.Printf("Failed to forward request to %s: %s", server, err)
-		}
+		forward(server, rw, r)
 	}))
 
 	log.Println("Starting load balancer...")
