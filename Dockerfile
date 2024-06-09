@@ -12,6 +12,6 @@ FROM alpine:latest
 WORKDIR /opt/practice-4
 COPY entry.sh /opt/practice-4/
 COPY --from=build /go/bin/* /opt/practice-4/
-RUN ls /opt/practice-4
+RUN ls -l /opt/practice-4
 ENTRYPOINT ["/opt/practice-4/entry.sh"]
-CMD ["server"]
+CMD ["lb"]

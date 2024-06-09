@@ -3,9 +3,9 @@
 bin=$1
 shift
 
-if [ -z $bin ]; then
+if [ -z "$bin" ]; then
   echo "binary is not defined"
   exit 1
 fi
 
-exec ./$bin $@
+exec /opt/practice-4/$bin "$@"\
