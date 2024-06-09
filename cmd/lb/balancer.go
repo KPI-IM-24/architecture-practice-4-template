@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/KPI-IM-24/architecture-practice-4-template/httptools"
@@ -22,12 +23,11 @@ var (
 )
 
 var (
-	timeout     = time.Duration(*timeoutSec) * time.Second
-	serversPool = []string{
-		"server1:8080",
-		"server2:8080",
-		"server3:8080",
-	}
+	timeout            = time.Duration(*timeoutSec) * time.Second
+	serversPool        = []string{"server1:8080", "server2:8080", "server3:8080"}
+	healthyServersPool []string
+	lockPool           sync.Mutex
+	healthStatus       sync.Map
 )
 
 func scheme() string {
@@ -38,21 +38,79 @@ func scheme() string {
 }
 
 func health(dst string) bool {
-	ctx, _ := context.WithTimeout(context.Background(), timeout)
-	req, _ := http.NewRequestWithContext(ctx, "GET",
-		fmt.Sprintf("%s://%s/health", scheme(), dst), nil)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s://%s/health", scheme(), dst), nil)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false
-	}
-	if resp.StatusCode != http.StatusOK {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		return false
 	}
 	return true
 }
 
+func healthCheck(ctx context.Context, servers []string) {
+	var wg sync.WaitGroup
+
+	for _, server := range servers {
+		healthStatus.Store(server, true)
+		healthyServersPool = append(healthyServersPool, server)
+	}
+
+	for _, server := range servers {
+		wg.Add(1)
+		go func(server string) {
+			defer wg.Done()
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					isHealthy := health(server)
+					lockPool.Lock()
+					healthStatus.Store(server, isHealthy)
+
+					if isHealthy {
+						if !contains(healthyServersPool, server) {
+							healthyServersPool = append(healthyServersPool, server)
+						}
+					} else {
+						healthyServersPool = remove(healthyServersPool, server)
+					}
+
+					lockPool.Unlock()
+					log.Println(server, isHealthy)
+				}
+			}
+		}(server)
+	}
+
+	wg.Wait()
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+func remove(slice []string, item string) []string {
+	for i, s := range slice {
+		if s == item {
+			return append(slice[:i], slice[i+1:]...)
+		}
+	}
+	return slice
+}
+
 func forward(dst string, rw http.ResponseWriter, r *http.Request) error {
-	ctx, _ := context.WithTimeout(r.Context(), timeout)
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
 	fwdRequest := r.Clone(ctx)
 	fwdRequest.RequestURI = ""
 	fwdRequest.URL.Host = dst
@@ -87,19 +145,27 @@ func forward(dst string, rw http.ResponseWriter, r *http.Request) error {
 func main() {
 	flag.Parse()
 
-	// TODO: Використовуйте дані про стан сервреа, щоб підтримувати список тих серверів, яким можна відправляти ззапит.
-	for _, server := range serversPool {
-		server := server
-		go func() {
-			for range time.Tick(10 * time.Second) {
-				log.Println(server, health(server))
-			}
-		}()
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go healthCheck(ctx, serversPool)
 
 	frontend := httptools.CreateServer(*port, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		// TODO: Рееалізуйте свій алгоритм балансувальника.
-		forward(serversPool[0], rw, r)
+		lockPool.Lock()
+		defer lockPool.Unlock()
+
+		if len(healthyServersPool) == 0 {
+			http.Error(rw, "No healthy servers available", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Simple round-robin load balancing
+		server := healthyServersPool[0]
+		healthyServersPool = append(healthyServersPool[1:], server)
+
+		if err := forward(server, rw, r); err != nil {
+			log.Printf("Failed to forward request to %s: %s", server, err)
+		}
 	}))
 
 	log.Println("Starting load balancer...")
