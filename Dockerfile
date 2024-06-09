@@ -5,7 +5,7 @@ COPY . .
 
 RUN go test ./...
 ENV CGO_ENABLED=0
-RUN go install ./cmd/...
+RUN go install ./cmd/... ./pkg/lb
 
 # ==== Final image ====
 FROM alpine:latest
