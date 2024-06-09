@@ -7,7 +7,7 @@ services:
 
   balancer:
     build: .
-    command: "lb --trace=true"
+    command: ["client", "--trace=true"]
     networks:
       - servers
     ports:
@@ -15,7 +15,7 @@ services:
 
   server1:
     build: .
-    command: "server"
+    command: ["server"]
     networks:
       - servers
     ports:
@@ -23,7 +23,7 @@ services:
 
   server2:
     build: .
-    command: "server"
+    command: ["server"]
     networks:
       - servers
     ports:
@@ -31,7 +31,7 @@ services:
 
   server3:
     build: .
-    command: "server"
+    command: ["server"]
     networks:
       - servers
     ports:
